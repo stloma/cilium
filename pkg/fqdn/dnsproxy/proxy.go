@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"syscall"
@@ -180,7 +181,8 @@ func StartDNSProxy(address string, port uint16, lookupEPFunc LookupEndpointIDByI
 		if err == nil {
 			break
 		}
-		log.WithError(err).Warn("Attempt to bind DNS Proxy failed")
+		log.WithError(err).Warnf("Attempt to bind DNS Proxy failed, retrying in %v", ProxyBindRetryInterval)
+		time.Sleep(ProxyBindRetryInterval)
 	}
 	if err != nil {
 		return nil, err
@@ -496,21 +498,48 @@ func bindToAddr(address string, port uint16) (UDPConn *net.UDPConn, TCPListener 
 	}
 	tcpFile, err := TCPListener.File()
 	if err != nil {
+		TCPListener.Close()
 		return nil, nil, err
 	}
+	defer tcpFile.Close()
 	// Mark outgoing packets as proxy egress return traffic (0x0b00)
 	err = syscall.SetsockoptInt(int(tcpFile.Fd()), syscall.SOL_SOCKET, syscall.SO_MARK, 0xb00)
 	if err != nil {
-		return nil, nil, err
+		if os.IsPermission(err) {
+			log.WithError(err).Warn("Setting TCP egress proxy socket mark failed")
+		} else {
+			TCPListener.Close()
+			return nil, nil, err
+		}
 	}
 
 	UDPAddr, err := net.ResolveUDPAddr("udp", TCPListener.Addr().String())
 	if err != nil {
+		TCPListener.Close()
 		return nil, nil, err
 	}
 	UDPConn, err = net.ListenUDP("udp", UDPAddr)
 	if err != nil {
+		TCPListener.Close()
 		return nil, nil, err
+	}
+	udpFile, err := UDPConn.File()
+	if err != nil {
+		UDPConn.Close()
+		TCPListener.Close()
+		return nil, nil, err
+	}
+	defer udpFile.Close()
+	// Mark outgoing packets as proxy egress return traffic (0x0b00)
+	err = syscall.SetsockoptInt(int(udpFile.Fd()), syscall.SOL_SOCKET, syscall.SO_MARK, 0xb00)
+	if err != nil {
+		if os.IsPermission(err) {
+			log.WithError(err).Warn("Setting UDP egress proxy socket mark failed")
+		} else {
+			UDPConn.Close()
+			TCPListener.Close()
+			return nil, nil, err
+		}
 	}
 
 	return UDPConn, TCPListener, nil

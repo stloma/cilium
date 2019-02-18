@@ -382,7 +382,9 @@ func (d *Daemon) bootstrapFQDN(restoredEndpoints *endpointRestoreState, preCache
 			stat.ProcessingTime.End(true)
 			return nil
 		})
-	proxy.DefaultDNSProxy.SetRejectReply(option.Config.FQDNRejectResponse)
+	if err == nil {
+		proxy.DefaultDNSProxy.SetRejectReply(option.Config.FQDNRejectResponse)
+	}
 	return err // filled by StartDNSProxy
 }
 

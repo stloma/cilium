@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"os"
 	"strconv"
 	"sync"
 	"syscall"
@@ -55,8 +56,13 @@ func transparentSetsockopt(fd int) error {
 	if err4 == nil {
 		err4 = unix.SetsockoptInt(fd, unix.SOL_IP, unix.IP_RECVORIGDSTADDR, 1)
 	}
-	// Only error out if both IPv4 and IPv6 fail
+	// Only error out if both IPv4 and IPv6 fail.
 	if err4 != nil && err6 != nil {
+		// Do not fail on permission errors. This is to help make unit testing only.
+		if os.IsPermission(err4) {
+			log.WithError(err4).Warn("Setting transparent socket options for UDP proxy failed")
+			err4 = nil
+		}
 		return err4
 	}
 	return nil
@@ -68,8 +74,16 @@ func listenConfig(mark int) *net.ListenConfig {
 			var opErr error
 			err := c.Control(func(fd uintptr) {
 				opErr = transparentSetsockopt(int(fd))
+				if os.IsPermission(opErr) {
+					log.WithError(opErr).Warn("Setting transparent socket options for UDP proxy failed")
+					opErr = nil
+				}
 				if opErr == nil {
 					opErr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_MARK, mark)
+					if os.IsPermission(opErr) {
+						log.WithError(opErr).Warn("Setting UDP egress proxy reply socket mark failed")
+						opErr = nil
+					}
 				}
 			})
 			if err != nil {
@@ -84,7 +98,7 @@ func listenPacket(network, addr string) *net.IPConn {
 	// Mark outgoing packets as proxy egress return traffic (0x0b00)
 	conn, err := listenConfig(0xb00).ListenPacket(context.Background(), network, addr)
 	if err != nil {
-		log.Printf("ListenPacket failed on address %s for %s: %s", addr, network, err)
+		log.Errorf("ListenPacket failed on address %s for %s: %s", addr, network, err)
 		return nil
 	}
 	return conn.(*net.IPConn)
