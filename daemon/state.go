@@ -28,6 +28,7 @@ import (
 	"github.com/cilium/cilium/pkg/endpoint"
 	"github.com/cilium/cilium/pkg/endpointmanager"
 	"github.com/cilium/cilium/pkg/identity/cache"
+	"github.com/cilium/cilium/pkg/ipcache"
 	"github.com/cilium/cilium/pkg/k8s"
 	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/logging/logfields"
@@ -237,12 +238,10 @@ func (d *Daemon) regenerateRestoredEndpoints(state *endpointRestoreState) {
 				epRegenerated <- false
 			}
 
-			// Wait for initial identities from the kvstore before
-			// doing any policy calculation for endpoints that don't have
-			// a fixed identity or are not well known.
-			if !identity.IsFixed() && !identity.IsWellKnown() {
-				cache.WaitForInitialIdentities()
-			}
+			// Wait for identities and ipcache to be synchronized
+			// from kvstore before any endpoint can be regenerated.
+			cache.WaitForInitialIdentities()
+			ipcache.WaitForInitialSync()
 
 			if err := ep.LockAlive(); err != nil {
 				scopedLog.Warn("Endpoint to restore has been deleted")
