@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -55,6 +56,7 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	apiextensionsclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/cache"
@@ -1256,6 +1258,12 @@ func cnpNodeStatusController(ciliumV2Store cache.Store, cnp *cilium_v2.CiliumNet
 	return overallErr
 }
 
+var (
+	// patchCNPStatusNodes is used to create the `/status/nodes` which is used
+	// right on the function bellow.
+	patchCNPStatusNodes = []byte(`[{"op":"test","path":"/status","value":null},{"op":"add","path":"/status","value":{"nodes":{}}}]`)
+)
+
 func updateCNPNodeStatus(cnp *cilium_v2.CiliumNetworkPolicy, enforcing, ok bool, err error, rev uint64, annotations map[string]string) error {
 	var (
 		cnpns cilium_v2.CiliumNetworkPolicyNodeStatus
@@ -1283,12 +1291,36 @@ func updateCNPNodeStatus(cnp *cilium_v2.CiliumNetworkPolicy, enforcing, ok bool,
 	nodeName := node.GetName()
 	cnp.SetPolicyStatus(nodeName, cnpns)
 	ns := k8sUtils.ExtractNamespace(&cnp.ObjectMeta)
+	cnpnsJSONByte, err := json.Marshal(cnpns)
+	if err != nil {
+		return err
+	}
 
 	switch {
 	case ciliumUpdateStatusVerConstr.Check(k8sServerVer):
-		_, err2 = ciliumNPClient.CiliumV2().CiliumNetworkPolicies(ns).UpdateStatus(cnp)
+		// This is a JSON Patch used to create the `/status/nodes` field in the
+		// CNP. If we don't create, replacing the status for this node will
+		// fail as the path does not exist.
+		// Worst case scenario is that all nodes try to perform this operation
+		// and only one node will succeed. This can be moved to the
+		// cilium-operator which will create the path for all nodes.
+
+		// We ignore the error from the patch as it's likely there's an error
+		_, _ = ciliumNPClient.CiliumV2().CiliumNetworkPolicies(ns).Patch(cnp.GetName(), types.JSONPatchType, patchCNPStatusNodes, "status")
+		patch := []byte(`[{"op":"replace","path":"/status/nodes/`)
+		patch = append(patch, []byte(nodeName)...)
+		patch = append(patch, []byte(`","value":`)...)
+		patch = append(patch, cnpnsJSONByte...)
+		patch = append(patch, []byte(`}]`)...)
+		_, err2 = ciliumNPClient.CiliumV2().CiliumNetworkPolicies(ns).Patch(cnp.GetName(), types.JSONPatchType, patch, "status")
 	default:
-		_, err2 = ciliumNPClient.CiliumV2().CiliumNetworkPolicies(ns).Update(cnp)
+		_, _ = ciliumNPClient.CiliumV2().CiliumNetworkPolicies(ns).Patch(cnp.GetName(), types.JSONPatchType, patchCNPStatusNodes)
+		patch := []byte(`[{"op":"replace","path":"/status/nodes/`)
+		patch = append(patch, []byte(nodeName)...)
+		patch = append(patch, []byte(`","value":`)...)
+		patch = append(patch, cnpnsJSONByte...)
+		patch = append(patch, []byte(`}]`)...)
+		_, err2 = ciliumNPClient.CiliumV2().CiliumNetworkPolicies(ns).Patch(cnp.GetName(), types.JSONPatchType, patch)
 	}
 	return err2
 }
